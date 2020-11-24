@@ -59,7 +59,7 @@ namespace DGAdvection
 
   // The polynomial degree can be selected between 0 and any reasonable number
   // (around 30), depending on the dimension and the mesh size
-  const unsigned int fe_degree = 4;
+  const unsigned int fe_degree = 1;
 
   // This parameter controls the mesh size by the number the initial mesh
   // (consisting of a single line/square/cube) is refined by doubling the
@@ -102,7 +102,7 @@ namespace DGAdvection
 
   // Whether to set periodic boundary conditions on the domain (needs periodic
   // solution as well)
-  const bool periodic = true;
+  const bool periodic = false;
 
   // Switch to change between a conservative formulation of the advection term
   // (factor 0) or a skew-symmetric one (factor 0.5)
@@ -1029,12 +1029,10 @@ namespace DGAdvection
         triangulation->set_all_manifold_ids(0);
         for (const auto &cell : triangulation->cell_iterators())
           {
-            for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+            for (const auto f : cell->face_indices())
               {
                 bool face_at_sphere_boundary = true;
-                for (unsigned int v = 0;
-                     v < GeometryInfo<dim - 1>::vertices_per_cell;
-                     ++v)
+                for (const auto v : cell->face(f)->vertex_indices())
                   if (std::abs(cell->face(f)->vertex(v).distance(center) -
                                0.2) > 1e-12)
                     face_at_sphere_boundary = false;
@@ -1051,8 +1049,7 @@ namespace DGAdvection
         if (dim == 2 && periodic)
           {
             for (const auto &cell : triangulation->cell_iterators())
-              for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell;
-                   ++f)
+              for (const auto f : cell->face_indices())
                 for (unsigned int d = 0; d < dim; ++d)
                   if (std::abs(cell->face(f)->center()[d]) < 1e-12)
                     cell->face(f)->set_all_boundary_ids(2 * d);
@@ -1077,8 +1074,7 @@ namespace DGAdvection
         if (periodic)
           {
             for (const auto &cell : triangulation->cell_iterators())
-              for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell;
-                   ++f)
+              for (const auto f : cell->face_indices())
                 if (cell->at_boundary(f))
                   cell->face(f)->set_all_boundary_ids(f);
             std::vector<GridTools::PeriodicFacePair<
@@ -1101,9 +1097,7 @@ namespace DGAdvection
 
             for (auto cell : triangulation->active_cell_iterators())
               {
-                for (unsigned int v = 0;
-                     v < GeometryInfo<dim>::vertices_per_cell;
-                     ++v)
+                for (const auto v : cell->vertex_indices())
                   {
                     if (vertex_touched[cell->vertex_index(v)] == false)
                       {
