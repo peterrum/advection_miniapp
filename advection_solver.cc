@@ -22,6 +22,7 @@
 
 #include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/mapping_q_generic.h>
+#include <deal.II/fe/mapping_fe.h>
 
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/grid_in.h>
@@ -47,10 +48,15 @@
 #include <deal.II/lac/solver_cg.h>
 #include <deal.II/lac/solver_control.h>
 
+#include <deal.II/simplex/fe_lib.h>
+#include <deal.II/simplex/grid_generator.h>
+#include <deal.II/simplex/quadrature_lib.h>
+
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 
+#define DO_SIMPLEX
 
 
 namespace DGAdvection
@@ -63,18 +69,18 @@ namespace DGAdvection
 
   // The polynomial degree can be selected between 0 and any reasonable number
   // (around 30), depending on the dimension and the mesh size
-  const unsigned int fe_degree = 1;
+  const unsigned int fe_degree = 2;
 
   // This parameter controls the mesh size by the number the initial mesh
   // (consisting of a single line/square/cube) is refined by doubling the
   // number of elements for every increase in number. Thus, the number of
   // elements is given by 2^(dim * n_global_refinements)
-  const unsigned int n_min_global_refinements = 2;
-  const unsigned int n_max_global_refinements = 3;
+  const unsigned int n_min_global_refinements = 4;
+  const unsigned int n_max_global_refinements = 4;
 
   // The time step size is controlled via this parameter as
   // dt = courant_number * min_h / (transport_norm * fe_degree^1.5)
-  const double courant_number = 0.5;
+  const double courant_number = 0.05;
 
   // 1: central flux, 0: classical upwind flux (= Lax-Friedrichs)
   const double flux_alpha = 0.0;
@@ -83,7 +89,7 @@ namespace DGAdvection
   const double FINAL_TIME = 2.0;
 
   // Frequency of output
-  const double output_tick = 0.1;
+  const double output_tick = 0.001;
 
   enum LowStorageRungeKuttaScheme
   {
@@ -443,8 +449,13 @@ namespace DGAdvection
   void
   AdvectionOperation<dim, fe_degree>::reinit(const DoFHandler<dim> &dof_handler)
   {
+#ifdef DO_SIMPLEX
+    MappingFE<dim> mapping(Simplex::FE_P<dim>(1));
+    Simplex::QGauss<dim> quadrature(fe_degree + 1);
+#else
     MappingQGeneric<dim> mapping(fe_degree);
     QGauss<dim> quadrature(fe_degree + 1);
+#endif
     
     typename MatrixFree<dim, Number>::AdditionalData additional_data;
     additional_data.overlap_communication_computation = false;
@@ -776,9 +787,11 @@ namespace DGAdvection
      LinearAlgebra::distributed::Vector<Number> temp(vec_ki);
      temp.copy_locally_owned_data_from (vec_ki);
       
-     ReductionControl reduction_control(1000);
+     ReductionControl reduction_control(1000, 1e-10, 1e-6);
      SolverCG<LinearAlgebra::distributed::Vector<Number>> solver(reduction_control);
     
+     std::cout << vec_ki.l2_norm() << " " << next_ri.l2_norm() << std::endl; 
+     
      solver.solve(*this, next_ri, temp, PreconditionIdentity());
     
      const auto fu = [&](const unsigned int start_range, const unsigned int end_range) {
@@ -1019,8 +1032,13 @@ namespace DGAdvection
     LinearAlgebra::distributed::Vector<Number> solution;
 
     std::shared_ptr<Triangulation<dim>> triangulation;
+#ifdef DO_SIMPLEX
+    MappingFE<dim>                mapping;
+    Simplex::FE_DGP<dim> fe;
+#else
     MappingQGeneric<dim>                mapping;
-    FE_DGQ<dim>                         fe;
+    FE_DGQ<dim> fe;
+#endif
     DoFHandler<dim>                     dof_handler;
 
     IndexSet locally_relevant_dofs;
@@ -1034,18 +1052,24 @@ namespace DGAdvection
 
   template <int dim>
   AdvectionProblem<dim>::AdvectionProblem()
+#ifdef DO_SIMPLEX
+    : mapping(Simplex::FE_P<dim>(1))
+#else
     : mapping(fe_degree)
+#endif
     , fe(fe_degree)
     , time(0)
     , time_step(0)
     , pcout(std::cout, Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
   {
+#ifndef DO_SIMPLEX
 #ifdef DEAL_II_WITH_P4EST
     if (dim > 1)
       triangulation =
         std::make_shared<parallel::distributed::Triangulation<dim>>(
           MPI_COMM_WORLD);
     else
+#endif
 #endif
       triangulation = std::make_shared<Triangulation<dim>>();
     
@@ -1065,9 +1089,15 @@ namespace DGAdvection
     Point<dim> p2;
     for (unsigned int d = 0; d < dim; ++d)
       p2[d] = 1;
+#ifdef DO_SIMPLEX
+    std::vector<unsigned int> subdivisions(dim, Utilities::pow(2, n_refinements));
+#else
     std::vector<unsigned int> subdivisions(dim, 1);
+#endif
     if (mesh_type == MeshType::inscribed_circle)
       {
+        Assert(false, ExcNotImplemented());
+        
         Triangulation<dim> tria1, tria2;
         Point<dim>         center;
         for (unsigned int d = 0; d < dim; ++d)
@@ -1129,13 +1159,22 @@ namespace DGAdvection
       }
     else
       {
+#ifdef DO_SIMPLEX
+        GridGenerator::subdivided_hyper_rectangle_with_simplices(*triangulation,
+                                                  subdivisions,
+                                                  p1,
+                                                  p2);
+#else
         GridGenerator::subdivided_hyper_rectangle(*triangulation,
                                                   subdivisions,
                                                   p1,
                                                   p2);
+#endif
 
         if (periodic)
           {
+            Assert(false, ExcNotImplemented());
+            
             for (const auto &cell : triangulation->cell_iterators())
               for (const auto f : cell->face_indices())
                 if (cell->at_boundary(f))
@@ -1151,6 +1190,8 @@ namespace DGAdvection
 
         if (mesh_type == MeshType::deformed_cartesian)
           {
+            Assert(false, ExcNotImplemented());
+        
             DeformedCubeManifold<dim> manifold(0.0, 1.0, 0.12, 2);
             triangulation->set_all_manifold_ids(1);
             triangulation->set_manifold(1, manifold);
@@ -1174,7 +1215,9 @@ namespace DGAdvection
           }
       }
 
+#ifndef DO_SIMPLEX
     triangulation->refine_global(n_refinements);
+#endif
 
     pcout << "   Number of elements:            "
           << triangulation->n_global_active_cells() << std::endl;
@@ -1263,9 +1306,11 @@ namespace DGAdvection
 
     // Write output to a vtu file
     DataOut<dim>          data_out;
+#ifndef DO_SIMPLEX
     DataOutBase::VtkFlags flags;
     flags.write_higher_order_cells = true;
     data_out.set_flags(flags);
+#endif
 
     data_out.attach_dof_handler(dof_handler);
     data_out.add_data_vector(solution, "solution");
@@ -1305,7 +1350,14 @@ namespace DGAdvection
 #else 
     AffineConstraints<Number> dummy;
     dummy.close();
-    VectorTools::project(mapping, dof_handler, dummy, QGauss<dim>(fe_degree), ExactSolution<dim>(0.0), solution);
+    
+#ifdef DO_SIMPLEX
+    Simplex::QGauss<dim> quad(fe_degree + 1);
+#elif
+    QGauss<dim> quad(fe_degree + 1);
+#endif
+    //VectorTools::project(mapping, dof_handler, dummy, quad, ExactSolution<dim>(0.0), solution);
+    VectorTools::interpolate(mapping, dof_handler, ExactSolution<dim>(0.0), solution);
 #endif
     
     unsigned int n_output = 0;
