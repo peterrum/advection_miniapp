@@ -112,14 +112,6 @@ namespace DGAdvection
   // (factor 0) or a skew-symmetric one (factor 0.5)
   const double factor_skew = 0.0;
 
-  // Switch to enable Gauss-Lobatto quadrature (true) or Gauss quadrature
-  // (false)
-  const bool use_gl_quad = false;
-
-  // Switch to enable Gauss--Lobatto quadrature for the inverse mass
-  // matrix. If false, use Gauss quadrature
-  const bool use_gl_quad_mass = false;
-
   // Enable high-frequency components in the solution
   const bool high_frequency_sol = false;
 
@@ -452,12 +444,8 @@ namespace DGAdvection
   AdvectionOperation<dim, fe_degree>::reinit(const DoFHandler<dim> &dof_handler)
   {
     MappingQGeneric<dim> mapping(fe_degree);
-    Quadrature<1>        quadrature = QGauss<1>(fe_degree + 1);
-    if (use_gl_quad)
-      quadrature = QGaussLobatto<1>(fe_degree + 1);
-    Quadrature<1> quadrature_mass = QGauss<1>(fe_degree + 1);
-    if (use_gl_quad_mass || use_gl_quad)
-      quadrature_mass = QGaussLobatto<1>(fe_degree + 1);
+    QGauss<dim> quadrature(fe_degree + 1);
+    
     typename MatrixFree<dim, Number>::AdditionalData additional_data;
     additional_data.overlap_communication_computation = false;
     additional_data.mapping_update_flags =
@@ -473,9 +461,9 @@ namespace DGAdvection
     AffineConstraints<double> dummy;
     dummy.close();
     data.reinit(mapping,
-                {{&dof_handler}},
-                std::vector<const AffineConstraints<double> *>{{&dummy}},
-                std::vector<Quadrature<1>>{{quadrature, quadrature_mass}},
+                dof_handler,
+                dummy,
+                quadrature,
                 additional_data);
   }
 
@@ -651,7 +639,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data, 0, 1);
+    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data);
 
     for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
       {
@@ -675,7 +663,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data, 0, 1);
+    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data);
 
     MatrixFreeOperators::CellwiseInverseMassMatrix<dim, fe_degree, 1, Number>
       inverse(eval);
