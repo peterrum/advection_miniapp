@@ -477,7 +477,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data);
+    FEEvaluation<dim, -1, 0, 1, Number> eval(data);
 
     ExactSolution<dim> solution(time);
 
@@ -527,10 +527,8 @@ namespace DGAdvection
     // about what is minus and plus is arbitrary at this point, so we must
     // assume that this can be arbitrarily oriented and we must only operate
     // with the generic quantities such as the normal vector.
-    FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval_minus(data,
-                                                                          true);
-    FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval_plus(data,
-                                                                         false);
+    FEFaceEvaluation<dim, -1, 0, 1, Number> eval_minus(data, true);
+    FEFaceEvaluation<dim, -1, 0, 1, Number> eval_plus(data, false);
 
     ExactSolution<dim>                      solution(time);
     Tensor<1, dim, VectorizedArray<Number>> speed;
@@ -588,8 +586,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     face_range) const
   {
-    FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval_minus(data,
-                                                                          true);
+    FEFaceEvaluation<dim, -1, 0, 1, Number> eval_minus(data, true);
 
     ExactSolution<dim>                      solution(time);
     Tensor<1, dim, VectorizedArray<Number>> speed;
@@ -639,7 +636,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data);
+    FEEvaluation<dim, -1, 0, 1, Number> eval(data);
 
     for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
       {
@@ -663,7 +660,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data);
+    FEEvaluation<dim, -1, 0, 1, Number> eval(data);
 
     MatrixFreeOperators::CellwiseInverseMassMatrix<dim, fe_degree, 1, Number>
       inverse(eval);
@@ -825,7 +822,7 @@ namespace DGAdvection
     LinearAlgebra::distributed::Vector<Number> &dst) const
   {
     ExactSolution<dim>                                     solution(0.);
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> phi(data);
+    FEEvaluation<dim, -1, 0, 1, Number> phi(data);
     MatrixFreeOperators::CellwiseInverseMassMatrix<dim, fe_degree, 1, Number>
       inverse(phi);
     dst.zero_out_ghosts();
@@ -848,7 +845,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &vec) const
   {
     Tensor<1, 3>                                           mass_energy = {};
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> phi(data);
+    FEEvaluation<dim, -1, 0, 1, Number> phi(data);
     for (unsigned int cell = 0; cell < data.n_cell_batches(); ++cell)
       {
         phi.reinit(cell);
