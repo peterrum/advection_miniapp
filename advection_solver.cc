@@ -22,6 +22,7 @@
 
 #include <deal.II/fe/fe_dgq.h>
 #include <deal.II/fe/mapping_q_generic.h>
+#include <deal.II/fe/mapping_fe.h>
 
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/grid_in.h>
@@ -43,10 +44,19 @@
 #include <deal.II/numerics/solution_transfer.h>
 #include <deal.II/numerics/vector_tools.h>
 
+#include <deal.II/lac/precondition.h>
+#include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_control.h>
+
+#include <deal.II/simplex/fe_lib.h>
+#include <deal.II/simplex/grid_generator.h>
+#include <deal.II/simplex/quadrature_lib.h>
+
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 
+#define DO_SIMPLEX
 
 
 namespace DGAdvection
@@ -59,18 +69,18 @@ namespace DGAdvection
 
   // The polynomial degree can be selected between 0 and any reasonable number
   // (around 30), depending on the dimension and the mesh size
-  const unsigned int fe_degree = 4;
+  const unsigned int fe_degree = 2;
 
   // This parameter controls the mesh size by the number the initial mesh
   // (consisting of a single line/square/cube) is refined by doubling the
   // number of elements for every increase in number. Thus, the number of
   // elements is given by 2^(dim * n_global_refinements)
-  const unsigned int n_min_global_refinements = 2;
-  const unsigned int n_max_global_refinements = 3;
+  const unsigned int n_min_global_refinements = 4;
+  const unsigned int n_max_global_refinements = 4;
 
   // The time step size is controlled via this parameter as
   // dt = courant_number * min_h / (transport_norm * fe_degree^1.5)
-  const double courant_number = 0.5;
+  const double courant_number = 0.05;
 
   // 1: central flux, 0: classical upwind flux (= Lax-Friedrichs)
   const double flux_alpha = 0.0;
@@ -79,7 +89,7 @@ namespace DGAdvection
   const double FINAL_TIME = 2.0;
 
   // Frequency of output
-  const double output_tick = 0.1;
+  const double output_tick = 0.001;
 
   enum LowStorageRungeKuttaScheme
   {
@@ -102,19 +112,11 @@ namespace DGAdvection
 
   // Whether to set periodic boundary conditions on the domain (needs periodic
   // solution as well)
-  const bool periodic = true;
+  const bool periodic = false;
 
   // Switch to change between a conservative formulation of the advection term
   // (factor 0) or a skew-symmetric one (factor 0.5)
   const double factor_skew = 0.0;
-
-  // Switch to enable Gauss-Lobatto quadrature (true) or Gauss quadrature
-  // (false)
-  const bool use_gl_quad = false;
-
-  // Switch to enable Gauss--Lobatto quadrature for the inverse mass
-  // matrix. If false, use Gauss quadrature
-  const bool use_gl_quad_mass = false;
 
   // Enable high-frequency components in the solution
   const bool high_frequency_sol = false;
@@ -391,6 +393,14 @@ namespace DGAdvection
     Tensor<1, 3>
     compute_mass_and_energy(
       const LinearAlgebra::distributed::Vector<Number> &vec) const;
+    
+    void
+    vmult(LinearAlgebra::distributed::Vector<Number> &      dst,
+          const LinearAlgebra::distributed::Vector<Number> &src) const
+    {
+        data.cell_loop(
+        &AdvectionOperation::local_apply_mass_matrix, this, dst, src, true);
+    }
 
   private:
     MatrixFree<dim, Number> data;
@@ -399,8 +409,11 @@ namespace DGAdvection
     mutable std::vector<double> computing_times;
 
     void
-    apply_mass_matrix(const LinearAlgebra::distributed::Vector<Number> &src,
-                      LinearAlgebra::distributed::Vector<Number> &      dst);
+    local_apply_mass_matrix(
+      const MatrixFree<dim, Number> &                   data,
+      LinearAlgebra::distributed::Vector<Number> &      dst,
+      const LinearAlgebra::distributed::Vector<Number> &src,
+      const std::pair<unsigned int, unsigned int> &     cell_range) const;
 
     void
     local_apply_inverse_mass_matrix(
@@ -436,13 +449,14 @@ namespace DGAdvection
   void
   AdvectionOperation<dim, fe_degree>::reinit(const DoFHandler<dim> &dof_handler)
   {
+#ifdef DO_SIMPLEX
+    MappingFE<dim> mapping(Simplex::FE_P<dim>(1));
+    Simplex::QGauss<dim> quadrature(fe_degree + 1);
+#else
     MappingQGeneric<dim> mapping(fe_degree);
-    Quadrature<1>        quadrature = QGauss<1>(fe_degree + 1);
-    if (use_gl_quad)
-      quadrature = QGaussLobatto<1>(fe_degree + 1);
-    Quadrature<1> quadrature_mass = QGauss<1>(fe_degree + 1);
-    if (use_gl_quad_mass || use_gl_quad)
-      quadrature_mass = QGaussLobatto<1>(fe_degree + 1);
+    QGauss<dim> quadrature(fe_degree + 1);
+#endif
+    
     typename MatrixFree<dim, Number>::AdditionalData additional_data;
     additional_data.overlap_communication_computation = false;
     additional_data.mapping_update_flags =
@@ -458,9 +472,9 @@ namespace DGAdvection
     AffineConstraints<double> dummy;
     dummy.close();
     data.reinit(mapping,
-                {{&dof_handler}},
-                std::vector<const AffineConstraints<double> *>{{&dummy}},
-                std::vector<Quadrature<1>>{{quadrature, quadrature_mass}},
+                dof_handler,
+                dummy,
+                quadrature,
                 additional_data);
   }
 
@@ -474,7 +488,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data);
+    FEEvaluation<dim, -1, 0, 1, Number> eval(data);
 
     ExactSolution<dim> solution(time);
 
@@ -524,10 +538,8 @@ namespace DGAdvection
     // about what is minus and plus is arbitrary at this point, so we must
     // assume that this can be arbitrarily oriented and we must only operate
     // with the generic quantities such as the normal vector.
-    FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval_minus(data,
-                                                                          true);
-    FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval_plus(data,
-                                                                         false);
+    FEFaceEvaluation<dim, -1, 0, 1, Number> eval_minus(data, true);
+    FEFaceEvaluation<dim, -1, 0, 1, Number> eval_plus(data, false);
 
     ExactSolution<dim>                      solution(time);
     Tensor<1, dim, VectorizedArray<Number>> speed;
@@ -585,8 +597,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     face_range) const
   {
-    FEFaceEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval_minus(data,
-                                                                          true);
+    FEFaceEvaluation<dim, -1, 0, 1, Number> eval_minus(data, true);
 
     ExactSolution<dim>                      solution(time);
     Tensor<1, dim, VectorizedArray<Number>> speed;
@@ -630,13 +641,37 @@ namespace DGAdvection
 
   template <int dim, int fe_degree>
   void
+  AdvectionOperation<dim, fe_degree>::local_apply_mass_matrix(
+    const MatrixFree<dim, Number> &                   data,
+    LinearAlgebra::distributed::Vector<Number> &      dst,
+    const LinearAlgebra::distributed::Vector<Number> &src,
+    const std::pair<unsigned int, unsigned int> &     cell_range) const
+  {
+    FEEvaluation<dim, -1, 0, 1, Number> eval(data);
+
+    for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
+      {
+        eval.reinit(cell);
+        eval.gather_evaluate(src, true, false);
+
+        for (unsigned int q = 0; q < eval.n_q_points; ++q)
+            eval.submit_value(eval.get_value(q), q);
+
+        eval.integrate_scatter(true, false, dst);
+      }
+  }
+
+
+
+  template <int dim, int fe_degree>
+  void
   AdvectionOperation<dim, fe_degree>::local_apply_inverse_mass_matrix(
     const MatrixFree<dim, Number> &                   data,
     LinearAlgebra::distributed::Vector<Number> &      dst,
     const LinearAlgebra::distributed::Vector<Number> &src,
     const std::pair<unsigned int, unsigned int> &     cell_range) const
   {
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data, 0, 1);
+    FEEvaluation<dim, -1, 0, 1, Number> eval(data);
 
     MatrixFreeOperators::CellwiseInverseMassMatrix<dim, fe_degree, 1, Number>
       inverse(eval);
@@ -715,6 +750,7 @@ namespace DGAdvection
     computing_times[0] += timer.wall_time();
 
     timer.restart();
+#if false
     data.cell_loop(
       &AdvectionOperation<dim, fe_degree>::local_apply_inverse_mass_matrix,
       this,
@@ -746,6 +782,46 @@ namespace DGAdvection
               }
           }
       });
+#else
+      
+     LinearAlgebra::distributed::Vector<Number> temp(vec_ki);
+     temp.copy_locally_owned_data_from (vec_ki);
+      
+     ReductionControl reduction_control(1000, 1e-10, 1e-6);
+     SolverCG<LinearAlgebra::distributed::Vector<Number>> solver(reduction_control);
+    
+     std::cout << vec_ki.l2_norm() << " " << next_ri.l2_norm() << std::endl; 
+     
+     solver.solve(*this, next_ri, temp, PreconditionIdentity());
+    
+     const auto fu = [&](const unsigned int start_range, const unsigned int end_range) {
+        const Number ai = factor_ai;
+        const Number bi = factor_solution;
+        if (ai == Number())
+          {
+            DEAL_II_OPENMP_SIMD_PRAGMA
+            for (unsigned int i = start_range; i < end_range; ++i)
+              {
+                const Number k_i          = next_ri.local_element(i);
+                const Number sol_i        = solution.local_element(i);
+                solution.local_element(i) = sol_i + bi * k_i;
+              }
+          }
+        else
+          {
+            DEAL_II_OPENMP_SIMD_PRAGMA
+            for (unsigned int i = start_range; i < end_range; ++i)
+              {
+                const Number k_i          = next_ri.local_element(i);
+                const Number sol_i        = solution.local_element(i);
+                solution.local_element(i) = sol_i + bi * k_i;
+                next_ri.local_element(i)  = sol_i + ai * k_i;
+              }
+          }
+      };
+      
+      fu(0, solution.local_size ());
+#endif
     computing_times[1] += timer.wall_time();
 
     computing_times[2] += 1.;
@@ -759,11 +835,11 @@ namespace DGAdvection
     LinearAlgebra::distributed::Vector<Number> &dst) const
   {
     ExactSolution<dim>                                     solution(0.);
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> phi(data);
+    FEEvaluation<dim, -1, 0, 1, Number> phi(data);
     MatrixFreeOperators::CellwiseInverseMassMatrix<dim, fe_degree, 1, Number>
       inverse(phi);
     dst.zero_out_ghosts();
-    for (unsigned int cell = 0; cell < data.n_macro_cells(); ++cell)
+    for (unsigned int cell = 0; cell < data.n_cell_batches(); ++cell)
       {
         phi.reinit(cell);
         for (unsigned int q = 0; q < phi.n_q_points; ++q)
@@ -782,7 +858,7 @@ namespace DGAdvection
     const LinearAlgebra::distributed::Vector<Number> &vec) const
   {
     Tensor<1, 3>                                           mass_energy = {};
-    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> phi(data);
+    FEEvaluation<dim, -1, 0, 1, Number> phi(data);
     for (unsigned int cell = 0; cell < data.n_cell_batches(); ++cell)
       {
         phi.reinit(cell);
@@ -956,8 +1032,13 @@ namespace DGAdvection
     LinearAlgebra::distributed::Vector<Number> solution;
 
     std::shared_ptr<Triangulation<dim>> triangulation;
+#ifdef DO_SIMPLEX
+    MappingFE<dim>                mapping;
+    Simplex::FE_DGP<dim> fe;
+#else
     MappingQGeneric<dim>                mapping;
-    FE_DGQ<dim>                         fe;
+    FE_DGQ<dim> fe;
+#endif
     DoFHandler<dim>                     dof_handler;
 
     IndexSet locally_relevant_dofs;
@@ -971,12 +1052,17 @@ namespace DGAdvection
 
   template <int dim>
   AdvectionProblem<dim>::AdvectionProblem()
+#ifdef DO_SIMPLEX
+    : mapping(Simplex::FE_P<dim>(1))
+#else
     : mapping(fe_degree)
+#endif
     , fe(fe_degree)
     , time(0)
     , time_step(0)
     , pcout(std::cout, Utilities::MPI::this_mpi_process(MPI_COMM_WORLD) == 0)
   {
+#ifndef DO_SIMPLEX
 #ifdef DEAL_II_WITH_P4EST
     if (dim > 1)
       triangulation =
@@ -984,7 +1070,10 @@ namespace DGAdvection
           MPI_COMM_WORLD);
     else
 #endif
+#endif
       triangulation = std::make_shared<Triangulation<dim>>();
+    
+    dof_handler.reinit(*triangulation);
   }
 
 
@@ -1000,9 +1089,15 @@ namespace DGAdvection
     Point<dim> p2;
     for (unsigned int d = 0; d < dim; ++d)
       p2[d] = 1;
+#ifdef DO_SIMPLEX
+    std::vector<unsigned int> subdivisions(dim, Utilities::pow(2, n_refinements));
+#else
     std::vector<unsigned int> subdivisions(dim, 1);
+#endif
     if (mesh_type == MeshType::inscribed_circle)
       {
+        Assert(false, ExcNotImplemented());
+        
         Triangulation<dim> tria1, tria2;
         Point<dim>         center;
         for (unsigned int d = 0; d < dim; ++d)
@@ -1027,12 +1122,10 @@ namespace DGAdvection
         triangulation->set_all_manifold_ids(0);
         for (const auto &cell : triangulation->cell_iterators())
           {
-            for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell; ++f)
+            for (const auto f : cell->face_indices())
               {
                 bool face_at_sphere_boundary = true;
-                for (unsigned int v = 0;
-                     v < GeometryInfo<dim - 1>::vertices_per_cell;
-                     ++v)
+                for (const auto v : cell->face(f)->vertex_indices())
                   if (std::abs(cell->face(f)->vertex(v).distance(center) -
                                0.2) > 1e-12)
                     face_at_sphere_boundary = false;
@@ -1049,8 +1142,7 @@ namespace DGAdvection
         if (dim == 2 && periodic)
           {
             for (const auto &cell : triangulation->cell_iterators())
-              for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell;
-                   ++f)
+              for (const auto f : cell->face_indices())
                 for (unsigned int d = 0; d < dim; ++d)
                   if (std::abs(cell->face(f)->center()[d]) < 1e-12)
                     cell->face(f)->set_all_boundary_ids(2 * d);
@@ -1067,16 +1159,24 @@ namespace DGAdvection
       }
     else
       {
+#ifdef DO_SIMPLEX
+        GridGenerator::subdivided_hyper_rectangle_with_simplices(*triangulation,
+                                                  subdivisions,
+                                                  p1,
+                                                  p2);
+#else
         GridGenerator::subdivided_hyper_rectangle(*triangulation,
                                                   subdivisions,
                                                   p1,
                                                   p2);
+#endif
 
         if (periodic)
           {
+            Assert(false, ExcNotImplemented());
+            
             for (const auto &cell : triangulation->cell_iterators())
-              for (unsigned int f = 0; f < GeometryInfo<dim>::faces_per_cell;
-                   ++f)
+              for (const auto f : cell->face_indices())
                 if (cell->at_boundary(f))
                   cell->face(f)->set_all_boundary_ids(f);
             std::vector<GridTools::PeriodicFacePair<
@@ -1090,6 +1190,8 @@ namespace DGAdvection
 
         if (mesh_type == MeshType::deformed_cartesian)
           {
+            Assert(false, ExcNotImplemented());
+        
             DeformedCubeManifold<dim> manifold(0.0, 1.0, 0.12, 2);
             triangulation->set_all_manifold_ids(1);
             triangulation->set_manifold(1, manifold);
@@ -1099,9 +1201,7 @@ namespace DGAdvection
 
             for (auto cell : triangulation->active_cell_iterators())
               {
-                for (unsigned int v = 0;
-                     v < GeometryInfo<dim>::vertices_per_cell;
-                     ++v)
+                for (const auto v : cell->vertex_indices())
                   {
                     if (vertex_touched[cell->vertex_index(v)] == false)
                       {
@@ -1115,7 +1215,9 @@ namespace DGAdvection
           }
       }
 
+#ifndef DO_SIMPLEX
     triangulation->refine_global(n_refinements);
+#endif
 
     pcout << "   Number of elements:            "
           << triangulation->n_global_active_cells() << std::endl;
@@ -1127,7 +1229,7 @@ namespace DGAdvection
   void
   AdvectionProblem<dim>::setup_dofs()
   {
-    dof_handler.initialize(*triangulation, fe);
+    dof_handler.distribute_dofs(fe);
 
     if (time == 0.)
       {
@@ -1204,9 +1306,11 @@ namespace DGAdvection
 
     // Write output to a vtu file
     DataOut<dim>          data_out;
+#ifndef DO_SIMPLEX
     DataOutBase::VtkFlags flags;
     flags.write_higher_order_cells = true;
     data_out.set_flags(flags);
+#endif
 
     data_out.attach_dof_handler(dof_handler);
     data_out.add_data_vector(solution, "solution");
@@ -1240,8 +1344,22 @@ namespace DGAdvection
     AdvectionOperation<dim, fe_degree> advection_operator;
     advection_operator.reinit(dof_handler);
     advection_operator.initialize_dof_vector(solution);
+    
+#if false
     advection_operator.project_initial(solution);
-
+#else 
+    AffineConstraints<Number> dummy;
+    dummy.close();
+    
+#ifdef DO_SIMPLEX
+    Simplex::QGauss<dim> quad(fe_degree + 1);
+#elif
+    QGauss<dim> quad(fe_degree + 1);
+#endif
+    //VectorTools::project(mapping, dof_handler, dummy, quad, ExactSolution<dim>(0.0), solution);
+    VectorTools::interpolate(mapping, dof_handler, ExactSolution<dim>(0.0), solution);
+#endif
+    
     unsigned int n_output = 0;
     output_results(n_output++,
                    advection_operator.compute_mass_and_energy(solution));
