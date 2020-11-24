@@ -1314,8 +1314,15 @@ namespace DGAdvection
     AdvectionOperation<dim, fe_degree> advection_operator;
     advection_operator.reinit(dof_handler);
     advection_operator.initialize_dof_vector(solution);
+    
+#if false
     advection_operator.project_initial(solution);
-
+#else 
+    AffineConstraints<Number> dummy;
+    dummy.close();
+    VectorTools::project(mapping, dof_handler, dummy, QGauss<dim>(fe_degree), ExactSolution<dim>(0.0), solution);
+#endif
+    
     unsigned int n_output = 0;
     output_results(n_output++,
                    advection_operator.compute_mass_and_energy(solution));
