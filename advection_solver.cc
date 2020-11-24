@@ -391,6 +391,10 @@ namespace DGAdvection
     Tensor<1, 3>
     compute_mass_and_energy(
       const LinearAlgebra::distributed::Vector<Number> &vec) const;
+    
+    void
+    vmult(const LinearAlgebra::distributed::Vector<Number> &src,
+          LinearAlgebra::distributed::Vector<Number> &      dst);
 
   private:
     MatrixFree<dim, Number> data;
@@ -399,8 +403,11 @@ namespace DGAdvection
     mutable std::vector<double> computing_times;
 
     void
-    apply_mass_matrix(const LinearAlgebra::distributed::Vector<Number> &src,
-                      LinearAlgebra::distributed::Vector<Number> &      dst);
+    local_apply_mass_matrix(
+      const MatrixFree<dim, Number> &                   data,
+      LinearAlgebra::distributed::Vector<Number> &      dst,
+      const LinearAlgebra::distributed::Vector<Number> &src,
+      const std::pair<unsigned int, unsigned int> &     cell_range) const;
 
     void
     local_apply_inverse_mass_matrix(
@@ -630,6 +637,30 @@ namespace DGAdvection
 
   template <int dim, int fe_degree>
   void
+  AdvectionOperation<dim, fe_degree>::local_apply_mass_matrix(
+    const MatrixFree<dim, Number> &                   data,
+    LinearAlgebra::distributed::Vector<Number> &      dst,
+    const LinearAlgebra::distributed::Vector<Number> &src,
+    const std::pair<unsigned int, unsigned int> &     cell_range) const
+  {
+    FEEvaluation<dim, fe_degree, fe_degree + 1, 1, Number> eval(data, 0, 1);
+
+    for (unsigned int cell = cell_range.first; cell < cell_range.second; ++cell)
+      {
+        eval.reinit(cell);
+        eval.gather_evaluate(src, true, false);
+
+        for (unsigned int q = 0; q < eval.n_q_points; ++q)
+            eval.submit_value(eval.get_value(q), q);
+
+        eval.integrate_scatter(true, false, dst);
+      }
+  }
+
+
+
+  template <int dim, int fe_degree>
+  void
   AdvectionOperation<dim, fe_degree>::local_apply_inverse_mass_matrix(
     const MatrixFree<dim, Number> &                   data,
     LinearAlgebra::distributed::Vector<Number> &      dst,
@@ -715,6 +746,7 @@ namespace DGAdvection
     computing_times[0] += timer.wall_time();
 
     timer.restart();
+#if false
     data.cell_loop(
       &AdvectionOperation<dim, fe_degree>::local_apply_inverse_mass_matrix,
       this,
@@ -746,6 +778,41 @@ namespace DGAdvection
               }
           }
       });
+#else
+    data.cell_loop(
+      &AdvectionOperation<dim, fe_degree>::local_apply_inverse_mass_matrix,
+      this,
+      next_ri,
+      vec_ki);
+    
+     const auto fu = [&](const unsigned int start_range, const unsigned int end_range) {
+        const Number ai = factor_ai;
+        const Number bi = factor_solution;
+        if (ai == Number())
+          {
+            DEAL_II_OPENMP_SIMD_PRAGMA
+            for (unsigned int i = start_range; i < end_range; ++i)
+              {
+                const Number k_i          = next_ri.local_element(i);
+                const Number sol_i        = solution.local_element(i);
+                solution.local_element(i) = sol_i + bi * k_i;
+              }
+          }
+        else
+          {
+            DEAL_II_OPENMP_SIMD_PRAGMA
+            for (unsigned int i = start_range; i < end_range; ++i)
+              {
+                const Number k_i          = next_ri.local_element(i);
+                const Number sol_i        = solution.local_element(i);
+                solution.local_element(i) = sol_i + bi * k_i;
+                next_ri.local_element(i)  = sol_i + ai * k_i;
+              }
+          }
+      };
+      
+      fu(0, solution.local_size ());
+#endif
     computing_times[1] += timer.wall_time();
 
     computing_times[2] += 1.;
