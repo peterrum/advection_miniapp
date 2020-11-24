@@ -43,6 +43,10 @@
 #include <deal.II/numerics/solution_transfer.h>
 #include <deal.II/numerics/vector_tools.h>
 
+#include <deal.II/lac/precondition.h>
+#include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_control.h>
+
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -393,8 +397,12 @@ namespace DGAdvection
       const LinearAlgebra::distributed::Vector<Number> &vec) const;
     
     void
-    vmult(const LinearAlgebra::distributed::Vector<Number> &src,
-          LinearAlgebra::distributed::Vector<Number> &      dst);
+    vmult(LinearAlgebra::distributed::Vector<Number> &      dst,
+          const LinearAlgebra::distributed::Vector<Number> &src) const
+    {
+        data.cell_loop(
+        &AdvectionOperation::local_apply_mass_matrix, this, dst, src, true);
+    }
 
   private:
     MatrixFree<dim, Number> data;
@@ -779,11 +787,14 @@ namespace DGAdvection
           }
       });
 #else
-    data.cell_loop(
-      &AdvectionOperation<dim, fe_degree>::local_apply_inverse_mass_matrix,
-      this,
-      next_ri,
-      vec_ki);
+      
+     LinearAlgebra::distributed::Vector<Number> temp(vec_ki);
+     temp.copy_locally_owned_data_from (vec_ki);
+      
+     ReductionControl reduction_control(1000);
+     SolverCG<LinearAlgebra::distributed::Vector<Number>> solver(reduction_control);
+    
+     solver.solve(*this, next_ri, temp, PreconditionIdentity());
     
      const auto fu = [&](const unsigned int start_range, const unsigned int end_range) {
         const Number ai = factor_ai;
